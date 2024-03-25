@@ -1,0 +1,619 @@
+Description:
+  This template deploys a new VPC, with a pair of public and private subnets spread
+  across two Availability Zones. It deploys an internet gateway, with a default
+  route on the public subnets. It deploys a NAT gateways (one in each AZ),
+  and default routes for them in the private subnets. It consists of ECS Fargate
+  with LoadBalancer and Api-gateway with VPC endpoint that has HTTP request which is
+  potected by security Group. Waf is deployed on the Loadbalancer for additional Security.
+
+
+Parameters:
+  EnvironmentName:
+    Description: Environment purpose
+    Type: String
+    AllowedValues: [dev, qa, perf, preprod, prod]
+
+  Identifier:
+    Description: This will be the main identifier that will perform the prefix for all resources. For example, 'my-project' will create 'my-project-dev-ec2', 'my-project-dev-db', etc. 
+    Type: String
+
+  
+
+  #TODO see if this parameter is needed
+
+  TagClient:
+    Description: The cost-tracking tag 'Client' which is used for billing purposes.
+    Type: String   
+
+  TagProject:
+    Description: The cost-tracking tag 'Project' which is used for billing purposes.
+    Type: String
+
+  TagChargeable:
+    Description: The cost-tracking tag 'Chargeable' which is used for billing purposes. 
+    AllowedValues: [TBD, 'Yes', 'No' ]
+    Type: String
+    Default: TBD 
+
+  CambiumIP:
+    Description: The CIDR range for the VPC (recommended to use the default)
+    Type: String
+
+  VpcCIDR:
+    Description: The CIDR range for the VPC (recommended to use the default)
+    Type: String
+    Default: 172.32.0.0/16
+
+  PublicSubnet1CIDR:
+    Description: CIDR range for the public subnet in the first availability zone. (Recommended to use the default.)
+    Type: String
+    Default: 172.32.10.0/24
+
+  PublicSubnet2CIDR:
+    Description: CIDR range for the public subnet in the second availability zone. (Recommended to use the default.)
+    Type: String
+    Default: 172.32.20.0/24
+
+  PrivateSubnet1CIDR:
+    Description: CIDR range for the private subnet in the first availability zone. (Recommended to use the default.)
+    Type: String
+    Default: 172.32.30.0/24
+
+  PrivateSubnet2CIDR:
+    Description: CIDR range for the private subnet in the second availability zone. (Recommended to use the default.)
+    Type: String
+    Default: 172.32.40.0/24
+
+  Image:
+    Type: String
+
+  ContainerPort:
+    Type: Number
+    Default: 80
+
+  LoadBalancerPort:
+    Type: Number
+    Default: 80
+
+  HealthCheckPath:
+    Type: String
+    Default: /
+
+  # for autoscaling
+  MinContainers:
+    Type: Number
+    Default: 1
+
+  # Minimum number of tasks must be less than or equal to the number of desired tasks
+  DesiredTask:
+    Type: Number
+    Default: 1
+
+  # for autoscaling
+  MaxContainers:
+    Type: Number
+    Default: 1
+
+  # target CPU utilization (%)
+  AutoScalingTargetValue:
+    Type: Number
+    Default: 70
+
+
+    
+Resources:
+  ApplicationVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref Identifier, !Ref EnvironmentName, 'vpc']]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref Identifier, !Ref EnvironmentName, 'Internet-gateway']]
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref ApplicationVPC
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ApplicationVPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref Identifier, !Ref EnvironmentName, 'subnet-public-az1']]
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ApplicationVPC
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value:  !Join ['-', [!Ref Identifier, !Ref EnvironmentName, 'subnet-public-az2']]
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ApplicationVPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value:  !Join ['-', [!Ref Identifier, !Ref EnvironmentName, 'subnet-private-az1']]
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ApplicationVPC
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value:  !Join ['-', [!Ref Identifier, !Ref EnvironmentName, 'subnet-private-az2']]
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ApplicationVPC
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref Identifier, !Ref EnvironmentName, 'routing-public']]
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ApplicationVPC
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref Identifier, !Ref EnvironmentName, 'routing-private-az1']]
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ApplicationVPC
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref Identifier, !Ref EnvironmentName, 'routing-private-az2']]
+  
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      SubnetId: !Ref PrivateSubnet2
+
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: ApplicationVPC
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  DefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  DefaultPrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+
+ ######################## ECS ##########################################     
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Join ['-', [!Ref Identifier, !Ref EnvironmentName, 'Cluster'] ]
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    # Makes sure the log group is created before it is used.
+    DependsOn: LogGroup
+    Properties:
+      # Name of the task definition. Subsequent versions of the task definition are grouped together under this name.
+      Family: !Join ['', [!Ref Identifier,!Ref EnvironmentName, TaskDefinition]]
+      # awsvpc is required for Fargate
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      # 256 (.25 vCPU) - Available memory values: 0.5GB, 1GB, 2GB
+      # 512 (.5 vCPU) - Available memory values: 1GB, 2GB, 3GB, 4GB
+      # 1024 (1 vCPU) - Available memory values: 2GB, 3GB, 4GB, 5GB, 6GB, 7GB, 8GB
+      # 2048 (2 vCPU) - Available memory values: Between 4GB and 16GB in 1GB increments
+      # 4096 (4 vCPU) - Available memory values: Between 8GB and 30GB in 1GB increments
+      Cpu: 512
+      # 0.5GB, 1GB, 2GB - Available cpu values: 256 (.25 vCPU)
+      # 1GB, 2GB, 3GB, 4GB - Available cpu values: 512 (.5 vCPU)
+      # 2GB, 3GB, 4GB, 5GB, 6GB, 7GB, 8GB - Available cpu values: 1024 (1 vCPU)
+      # Between 4GB and 16GB in 1GB increments - Available cpu values: 2048 (2 vCPU)
+      # Between 8GB and 30GB in 1GB increments - Available cpu values: 4096 (4 vCPU)
+      Memory: 1GB
+      # A role needed by ECS.
+      # "The ARN of the task execution role that containers in this task can assume. All containers in this task are granted the permissions that are specified in this role."
+      # "There is an optional task execution IAM role that you can specify with Fargate to allow your Fargate tasks to make API calls to Amazon ECR."
+      ExecutionRoleArn: !Ref ExecutionRole
+      # "The Amazon Resource Name (ARN) of an AWS Identity and Access Management (IAM) role that grants containers in the task permission to call AWS APIs on your behalf."
+      TaskRoleArn: !Ref TaskRole
+      Tags:
+        - Key: Client
+          Value: !Ref TagClient
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Chargeable
+          Value: !Ref TagChargeable
+      ContainerDefinitions:
+        - Name: !Ref Identifier
+          Image: !Ref Image
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+          # Send logs to CloudWatch Logs
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroup
+              awslogs-stream-prefix: ecs
+
+  # A role needed by ECS
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ['-', [!Ref Identifier,!Ref EnvironmentName, ExecutionRole]]
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+  
+  # A role for the containers
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ['-', [!Ref Identifier,!Ref EnvironmentName, TaskRole]]
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSESFullAccess
+  
+  # A role needed for auto scaling
+  AutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ['-', [!Ref Identifier,!Ref EnvironmentName, AutoScalingRole]]
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscaleRole'
+  
+  ContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref Identifier,!Ref EnvironmentName, ContainerSecurityGroup]]
+      VpcId: !Ref ApplicationVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref Identifier,!Ref EnvironmentName, ContainerSecurityGroup]]
+        - Key: Client
+          Value: !Ref TagClient
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Chargeable
+          Value: !Ref TagChargeable 
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref Identifier,!Ref EnvironmentName, LoadBalancerSecurityGroup]]
+      VpcId: !Ref ApplicationVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref LoadBalancerPort
+          ToPort: !Ref LoadBalancerPort
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: '-1'
+          SourceSecurityGroupId: 
+            Fn::GetAtt:
+            - APIGWVPClinkSG
+            - GroupId  
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref Identifier,!Ref EnvironmentName, LoadBalancerSecurityGroup]]
+        - Key: Client
+          Value: !Ref TagClient
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Chargeable
+          Value: !Ref TagChargeable 
+
+  Service:
+    Type: AWS::ECS::Service
+    # This dependency is needed so that the load balancer is setup correctly in time
+    DependsOn:
+      - ListenerHTTP
+    Properties: 
+      ServiceName: !Ref Identifier
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      DesiredCount: !Ref DesiredTask
+      # This may need to be adjusted if the container takes a while to start up
+      HealthCheckGracePeriodSeconds: 30
+      LaunchType: FARGATE
+      NetworkConfiguration: 
+        AwsvpcConfiguration:
+          # change to DISABLED if you're using private subnets that have access to a NAT gateway
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+          SecurityGroups:
+            - !Ref ContainerSecurityGroup
+      LoadBalancers:
+        - ContainerName: !Ref Identifier
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
+  
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      # will look for a 200 status code by default unless specified otherwise
+      HealthCheckPath: !Ref HealthCheckPath
+      HealthCheckTimeoutSeconds: 5
+      UnhealthyThresholdCount: 2
+      HealthyThresholdCount: 2
+      Name: !Join ['-', [!Ref Identifier,!Ref EnvironmentName, TargetGroup]]
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60 # default is 300
+      TargetType: ip
+      VpcId: !Ref ApplicationVPC
+  
+  ListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: !Ref LoadBalancerPort
+      Protocol: HTTP
+      
+  
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      LoadBalancerAttributes:
+        # this is the default, but is specified here in case it needs to be changed
+        - Key: idle_timeout.timeout_seconds
+          Value: 60
+      Name: !Join ['-', [!Ref Identifier,!Ref EnvironmentName, LoadBalancer]]
+      # "internal" is also an option
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+  
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['-', [/ecs/, !Ref Identifier,!Ref EnvironmentName, TaskDefinition]]
+  
+  AutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: !Ref MinContainers
+      MaxCapacity: !Ref MaxContainers
+      ResourceId: !Join ['/', [service, !Ref Cluster, !GetAtt Service.Name]]
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      # "The Amazon Resource Name (ARN) of an AWS Identity and Access Management (IAM) role that allows Application Auto Scaling to modify your scalable target."
+      RoleARN: !GetAtt AutoScalingRole.Arn
+  
+  AutoScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Join ['-', [!Ref Identifier,!Ref EnvironmentName, AutoScalingPolicy]]
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 10
+        ScaleOutCooldown: 10
+        # Keep things at or lower than 50% CPU utilization, for example
+        TargetValue: !Ref AutoScalingTargetValue
+
+############################ API-GATEWAY ###################################################
+
+# Security group for APIGW VPC Link
+  APIGWVPClinkSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref ApplicationVPC
+      GroupName: !Join ['-', [!Ref Identifier,!Ref EnvironmentName, vpclink-security-group]]
+      GroupDescription: APIGW vpclink security group
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Join ['-', [!Ref Identifier,!Ref EnvironmentName, vpclink-security-group]]
+        - Key: Client
+          Value: !Ref TagClient
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Chargeable
+          Value: !Ref TagChargeable 
+
+  PrivateAPIGWvpcLink:  
+    Type: AWS::ApiGatewayV2::VpcLink
+    Properties: 
+      Name: private-apigw-vpclink
+      SecurityGroupIds: 
+        - !Ref APIGWVPClinkSG
+      SubnetIds: 
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+# Deploy API GW HTTP API route and integration to private ALB via VPC Link
+
+  HttpApiALB:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Join ['-', [!Ref Identifier,!Ref EnvironmentName, alb-HTTP-api]]
+      Description: HTTP API ALB
+      ProtocolType: HTTP
+   
+  APIRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApiALB
+      RouteKey: 'ANY /'
+      Target: !Join
+        - /
+        - - integrations
+          - !Ref APIIntegration  
+
+  APIIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApiALB
+      Description: Private ALB Integration
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      ConnectionType: VPC_LINK
+      ConnectionId: 
+        !Ref PrivateAPIGWvpcLink
+      IntegrationUri: 
+        !Ref ListenerHTTP 
+      PayloadFormatVersion: '1.0'
+
+  APIStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      StageName: $default
+      AutoDeploy: true
+      ApiId: !Ref HttpApiALB
+
+#######################WAF####################################
+  MyWebACL: 
+      Type: "AWS::WAFv2::WebACL"
+      Properties: 
+        Name: MyWebACL
+        Scope: REGIONAL
+        Description: This is an example WebACL
+        DefaultAction:
+          Allow:
+            CustomRequestHandling:
+              InsertHeaders:
+                - Name: AllowActionHeader1Name
+                  Value: AllowActionHeader1Value
+                - Name: AllowActionHeader2Name
+                  Value: AllowActionHeader2Value
+        VisibilityConfig:
+          SampledRequestsEnabled: false
+          CloudWatchMetricsEnabled: true
+          MetricName: ExampleWebACLMetric
+        Rules:
+          - Name: RuleWithAWSManagedRules
+            Priority: 0
+            OverrideAction:
+              Count: {}
+            VisibilityConfig:
+              SampledRequestsEnabled: false
+              CloudWatchMetricsEnabled: true
+              MetricName: RuleWithAWSManagedRulesMetric
+            Statement:
+              ManagedRuleGroupStatement:
+                VendorName: AWS
+                Name: AWSManagedRulesCommonRuleSet
+                ExcludedRules: []
+
+  MyWebACLAssociation:
+    Type: "AWS::WAFv2::WebACLAssociation"
+    Properties:
+      WebACLArn: !GetAtt MyWebACL.Arn
+      ResourceArn: !Ref  LoadBalancer
+Outputs:
+  APIURL:
+    Description: Invoke URL
+    Value: !Sub https://${HttpApiALB}.execute-api.${AWS::Region}.amazonaws.com/               
